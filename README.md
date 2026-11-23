@@ -28,23 +28,35 @@ impressos nas placas. O LCD e os módulos RF precisam do GND comum com esse ESP3
 3. Feche os Monitores Seriais do Arduino IDE. Só um programa pode abrir cada
    porta COM. Execute os comandos abaixo na pasta deste projeto.
 
-No **PC receptor**, primeiro:
+No **PC receptor**, primeiro (o programa permanece aberto):
 
 ```powershell
 py pc_transfer.py receive
 ```
 
-No **outro PC**, ligado ao ESP32 transmissor, envie um texto:
+No **outro PC**, ligado ao ESP32 transmissor, abra o menu interativo:
 
 ```powershell
-py pc_transfer.py send --text "OLA TESTE"
+py pc_transfer.py send
 ```
 
-Ou envie uma imagem pequena, com no máximo **16 KiB**:
+No menu, escolha **1** para digitar um texto, **2** para informar o caminho de
+uma imagem (até 16 KiB), **3** para alternar entre **SW** (Stop-and-Wait) e
+**SR** (Selective Repeat), **4** para reiniciar o ESP32 deste PC e **0** para
+sair. O menu volta após cada envio; não é preciso executar o Python de novo.
+
+Para um envio único sem o menu, também é possível usar:
 
 ```powershell
-py pc_transfer.py send --image .\figura.png
+py pc_transfer.py send --text "OLA TESTE" --mode SW
+py pc_transfer.py send --image .\figura.png --mode SR
 ```
+
+No PC receptor, digite `/reset` e Enter para reiniciar o ESP32 conectado a
+ele; `/sair` encerra. O ESP32 transmissor pode ser reiniciado pela opção 4 do
+menu. Para reiniciar a placa local em uma execução separada, use
+`py pc_transfer.py reset`. Cada Python controla sua própria placa USB; para
+reiniciar **os dois** ESP32, use a opção de reset em **cada computador**.
 
 Cada PC detecta automaticamente sua porta se tiver apenas um dispositivo USB
 serial. Se houver mais de um, o programa lista as portas encontradas e você
@@ -70,9 +82,11 @@ para codificar cada bit. Não usa biblioteca de protocolo RF.
 
 O primeiro DATA de cada transferência traz `T` (texto) ou `I` (imagem) e o
 tamanho total em uint32 little-endian. Os DATA seguintes trazem os bytes.
-O END só é aceito após todos os bytes. O transmissor espera um ACK com o mesmo
-SEQ para cada DATA e END; após timeout, retransmite até dez vezes. O receptor
-confirma quadros duplicados, mas não acrescenta seus bytes novamente. Um quadro
+O END só é aceito após todos os bytes. No modo **SW**, a janela é de 1 quadro.
+No modo **SR**, a janela é de 4 quadros: o transmissor acompanha o ACK de cada
+SEQ e retransmite apenas os que faltarem; o receptor guarda quadros fora de
+ordem e entrega os dados em ordem ao PC. Cada quadro admite até dez tentativas.
+O receptor confirma quadros duplicados sem acrescentar seus bytes novamente. Um quadro
 com CRC incorreto é descartado. O PC receptor reconstrói exatamente os bytes
 recebidos; uma imagem não é convertida ou comprimida pelo programa.
 
@@ -80,7 +94,7 @@ recebidos; uma imagem não é convertida ou comprimida pelo programa.
 ambos os ESP32 antes de repetir, para sincronizar a sequência. Os parâmetros
 de pulso podem precisar de ajuste conforme os módulos e a interferência no local.
 
-Para demonstrar a recuperação do Stop-and-Wait, altere
+Para demonstrar a recuperação de SW ou SR, altere
 `SIMULAR_PERDA_DE_ACK` para `true` no sketch receptor e grave-o novamente.
 O primeiro ACK não será enviado: o transmissor registrará um timeout e
 repetirá o quadro; o receptor reconhecerá o duplicado e enviará o ACK sem

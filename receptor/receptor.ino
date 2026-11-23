@@ -190,6 +190,14 @@ static constexpr uint32_t MAX_BYTES = 16384;
 // Mude para true para demonstrar uma retransmissao (o primeiro ACK e omitido).
 static constexpr bool SIMULAR_PERDA_DE_ACK = false;
 static bool perdaSimulada = false;
+static constexpr uint8_t SR_WINDOW = 4;
+struct SlotRx {
+  Rf433::Frame quadro;
+  bool ocupado;
+};
+static SlotRx pendentes[SR_WINDOW] = {};
+static char comandoUsb[16];
+static uint8_t comandoUsado = 0;
 
 void mostrarNoLcd(const uint8_t *dados, uint8_t quantidade) {
   for (uint8_t i = 0; i < quantidade; ++i) {
@@ -230,7 +238,60 @@ void setup() {
   Serial.println("@READY_RX");
 }
 
+void verificarComandoUsb() {
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\r') continue;
+    if (c == '\n') {
+      comandoUsb[comandoUsado] = '\0';
+      comandoUsado = 0;
+      if (strcmp(comandoUsb, "RESET") == 0) {
+        Serial.println("@RESETTING");
+        Serial.flush();
+        delay(50);
+        ESP.restart();
+      }
+    } else if (comandoUsado < sizeof(comandoUsb) - 1) {
+      comandoUsb[comandoUsado++] = c;
+    } else comandoUsado = 0;
+  }
+}
+
+void entregar(const Rf433::Frame &quadro) {
+  if (quadro.type == Rf433::DATA) {
+    if (!transferenciaAtiva) {
+      if (quadro.len != 5 || (quadro.data[0] != 'T' && quadro.data[0] != 'I')) {
+        Serial.println("Metadados invalidos");
+        return;
+      }
+      const uint32_t total = static_cast<uint32_t>(quadro.data[1]) |
+                             (static_cast<uint32_t>(quadro.data[2]) << 8) |
+                             (static_cast<uint32_t>(quadro.data[3]) << 16) |
+                             (static_cast<uint32_t>(quadro.data[4]) << 24);
+      if (total > MAX_BYTES) return;
+      tipoTransferencia = static_cast<char>(quadro.data[0]);
+      restantes = total;
+      transferenciaAtiva = true;
+      lcd.clear();
+      posicaoLcd = 0;
+      if (tipoTransferencia == 'I') lcd.print("Recebendo imagem");
+      Serial.printf("@START %c %lu\n", tipoTransferencia,
+                    static_cast<unsigned long>(total));
+    } else {
+      if (quadro.len == 0 || quadro.len > restantes) return;
+      imprimirHex(quadro.data, quadro.len);
+      if (tipoTransferencia == 'T') mostrarNoLcd(quadro.data, quadro.len);
+      restantes -= quadro.len;
+    }
+  } else if (quadro.type == Rf433::END && transferenciaAtiva &&
+             quadro.len == 0 && restantes == 0) {
+    Serial.println("@END");
+    transferenciaAtiva = false;
+  }
+}
+
 void loop() {
+  verificarComandoUsb();
   Rf433::Frame quadro;
   bool crcRuim = false;
   if (!Rf433::receive(quadro, crcRuim)) {
@@ -238,42 +299,30 @@ void loop() {
     delay(1);
     return;
   }
-
   if (quadro.type != Rf433::DATA && quadro.type != Rf433::END) return;
-  if (quadro.seq == proximaSequencia) {
-    if (quadro.type == Rf433::DATA) {
-      if (!transferenciaAtiva) {
-        if (quadro.len != 5 || (quadro.data[0] != 'T' && quadro.data[0] != 'I')) return;
-        const uint32_t total = static_cast<uint32_t>(quadro.data[1]) |
-                               (static_cast<uint32_t>(quadro.data[2]) << 8) |
-                               (static_cast<uint32_t>(quadro.data[3]) << 16) |
-                               (static_cast<uint32_t>(quadro.data[4]) << 24);
-        if (total > MAX_BYTES) return;
-        tipoTransferencia = static_cast<char>(quadro.data[0]);
-        restantes = total;
-        transferenciaAtiva = true;
-        lcd.clear();
-        posicaoLcd = 0;
-        if (tipoTransferencia == 'I') lcd.print("Recebendo imagem");
-        Serial.printf("@START %c %lu\n", tipoTransferencia,
-                      static_cast<unsigned long>(total));
-      } else {
-        if (quadro.len == 0 || quadro.len > restantes) return;
-        imprimirHex(quadro.data, quadro.len);
-        if (tipoTransferencia == 'T') mostrarNoLcd(quadro.data, quadro.len);
-        restantes -= quadro.len;
-      }
-    } else {
-      if (!transferenciaAtiva || quadro.len != 0 || restantes != 0) return;
-      Serial.println("@END");
-      transferenciaAtiva = false;
+
+  const uint8_t adiante = static_cast<uint8_t>(quadro.seq - proximaSequencia);
+  if (adiante < SR_WINDOW) {
+    SlotRx &slot = pendentes[quadro.seq % SR_WINDOW];
+    if (slot.ocupado && slot.quadro.seq != quadro.seq) return;
+    if (!slot.ocupado) {
+      slot.quadro = quadro;
+      slot.ocupado = true;
+      if (adiante) Serial.printf("SR: guardado SEQ=%u fora de ordem\n", quadro.seq);
     }
-    ++proximaSequencia;
     confirmar(quadro.seq);
-  } else if (quadro.seq == static_cast<uint8_t>(proximaSequencia - 1)) {
-    Serial.printf("Quadro duplicado SEQ=%u\n", quadro.seq);
-    confirmar(quadro.seq);
+    while (pendentes[proximaSequencia % SR_WINDOW].ocupado &&
+           pendentes[proximaSequencia % SR_WINDOW].quadro.seq == proximaSequencia) {
+      SlotRx &atual = pendentes[proximaSequencia % SR_WINDOW];
+      entregar(atual.quadro);
+      atual.ocupado = false;
+      ++proximaSequencia;
+    }
   } else {
-    Serial.printf("SEQ fora de ordem: %u (esperado %u)\n", quadro.seq, proximaSequencia);
+    const uint8_t atras = static_cast<uint8_t>(proximaSequencia - quadro.seq);
+    if (atras >= 1 && atras <= SR_WINDOW) {
+      Serial.printf("Quadro duplicado SEQ=%u\n", quadro.seq);
+      confirmar(quadro.seq);
+    }
   }
 }
