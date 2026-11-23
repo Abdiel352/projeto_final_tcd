@@ -42,14 +42,17 @@ py pc_transfer.py send
 
 No menu, escolha **1** para digitar um texto, **2** para informar o caminho de
 uma imagem (até 16 KiB), **3** para alternar entre **SW** (Stop-and-Wait) e
-**SR** (Selective Repeat), **4** para reiniciar o ESP32 deste PC e **0** para
-sair. O menu volta após cada envio; não é preciso executar o Python de novo.
+**SR** (Selective Repeat), **4** para reiniciar o ESP32 deste PC, **5** para
+alterar a espera pelo ACK e **0** para sair. O padrão é **3000 ms**, ajustável
+de 500 a 10000 ms. O menu volta após cada envio; não é preciso executar o
+Python de novo.
 
 Para um envio único sem o menu, também é possível usar:
 
 ```powershell
 py pc_transfer.py send --text "OLA TESTE" --mode SW
 py pc_transfer.py send --image .\figura.png --mode SR
+py pc_transfer.py send --text "OLA" --mode SW --ack-timeout 5000
 ```
 
 No PC receptor, digite `/reset` e Enter para reiniciar o ESP32 conectado a

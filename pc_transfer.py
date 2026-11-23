@@ -12,6 +12,7 @@ import time
 
 
 MAX_BYTES = 16_384
+MAX_TRIES = 10
 
 
 def select_port(requested):
@@ -69,13 +70,14 @@ def reset_device(port):
     raise TimeoutError("O ESP32 não respondeu após RESET.")
 
 
-def send_payload(port, kind, payload, mode, chunk_size):
+def send_payload(port, kind, payload, mode, chunk_size, ack_timeout_ms=3000):
     if len(payload) > MAX_BYTES:
         raise ValueError(f"Arquivo com {len(payload)} bytes; limite atual: {MAX_BYTES} bytes.")
-    port.write(f"START {kind} {len(payload)} {mode} {chunk_size}\n".encode("ascii"))
+    port.write(f"START {kind} {len(payload)} {mode} {chunk_size} {ack_timeout_ms}\n".encode("ascii"))
     loaded = 0
     while True:
-        event = read_event(port, time.monotonic() + 30)
+        # Aguarda todas as tentativas do firmware antes de declarar falha no PC.
+        event = read_event(port, time.monotonic() + MAX_TRIES * ack_timeout_ms / 1000 + 15)
         if event.startswith("@FAIL"):
             raise RuntimeError(f"Transmissão falhou: {event}. Reinicie os dois ESP32.")
         if event == "@DONE":
@@ -106,12 +108,15 @@ def send(args):
         if args.text is not None or args.image is not None:
             kind = "T" if args.text is not None else "I"
             payload = args.text.encode("utf-8") if kind == "T" else Path(args.image).read_bytes()
-            send_payload(port, kind, payload, args.mode, args.chunk)
+            send_payload(port, kind, payload, args.mode, args.chunk, args.ack_timeout)
             return
 
         mode = args.mode
+        ack_timeout_ms = args.ack_timeout
         while True:
-            print(f"\nModo atual: {mode}. 1=Texto  2=Imagem  3=Alternar modo  4=Reset local  0=Sair")
+            print(f"\nModo: {mode}; espera ACK: {ack_timeout_ms} ms. "
+                  "1=Texto  2=Imagem  3=Alternar modo  4=Reset local  "
+                  "5=Alterar espera  0=Sair")
             choice = input("Escolha: ").strip()
             try:
                 if choice == "0":
@@ -122,12 +127,19 @@ def send(args):
                 if choice == "4":
                     reset_device(port)
                     continue
+                if choice == "5":
+                    novo = int(input("Espera pelo ACK em ms (500 a 10000): "))
+                    if not 500 <= novo <= 10000:
+                        raise ValueError("A espera deve ficar entre 500 e 10000 ms.")
+                    ack_timeout_ms = novo
+                    continue
                 if choice == "1":
                     payload = input("Texto: ").encode("utf-8")
-                    send_payload(port, "T", payload, mode, args.chunk)
+                    send_payload(port, "T", payload, mode, args.chunk, ack_timeout_ms)
                 elif choice == "2":
                     path = Path(input("Caminho da imagem: ").strip().strip('"')).expanduser()
-                    send_payload(port, "I", path.read_bytes(), mode, args.chunk)
+                    send_payload(port, "I", path.read_bytes(), mode, args.chunk,
+                                 ack_timeout_ms)
                 else:
                     print("Opção inválida.")
             except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
@@ -232,6 +244,8 @@ def main():
     sender.add_argument("--chunk", type=int, default=8, help="Bytes por quadro (1–16; padrão: 8)")
     sender.add_argument("--mode", choices=("SW", "SR"), default="SW",
                         help="Stop-and-Wait ou Selective Repeat (padrão: SW)")
+    sender.add_argument("--ack-timeout", type=int, default=3000, metavar="MS",
+                        help="Espera pelo ACK em ms (500–10000; padrão: 3000)")
     receiver = sub.add_parser("receive", help="Reconstrói texto/imagem no PC receptor")
     receiver.add_argument("--port", help="Opcional; ex.: COM6. Detecta se houver uma única USB.")
     receiver.add_argument("--output", help="Arquivo de saída; opcional para texto")
@@ -242,6 +256,8 @@ def main():
     if args.command == "send":
         if not 1 <= args.chunk <= 16:
             parser.error("--chunk deve ficar entre 1 e 16")
+        if not 500 <= args.ack_timeout <= 10000:
+            parser.error("--ack-timeout deve ficar entre 500 e 10000 ms")
         send(args)
     elif args.command == "receive":
         receive(args)

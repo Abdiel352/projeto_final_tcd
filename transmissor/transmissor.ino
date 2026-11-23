@@ -166,9 +166,9 @@ inline void send(uint8_t type, uint8_t seq, const uint8_t *data, uint8_t len) {
 // SW usa janela 1; SR usa janela 4 e retransmite so os quadros sem ACK.
 static constexpr uint32_t MAX_BYTES = 16384;
 static constexpr uint8_t SR_WINDOW = 4;
-static constexpr uint32_t RETRY_MS = 1000;
 static constexpr uint32_t RF_GAP_MS = 180;
 static constexpr uint8_t MAX_TRIES = 10;
+static uint32_t ackTimeoutMs = 3000;
 static uint8_t arquivo[MAX_BYTES];
 static char linha[80];
 static uint8_t usados = 0;
@@ -267,7 +267,7 @@ bool transmitirArquivo() {
       SlotTx *reenviar = nullptr;
       for (uint16_t i = base; i < proximo; ++i) {
         SlotTx &slot = slots[i % SR_WINDOW];
-        if (slot.ativo && !slot.confirmado && agora - slot.enviadoEm >= RETRY_MS) {
+        if (slot.ativo && !slot.confirmado && agora - slot.enviadoEm >= ackTimeoutMs) {
           reenviar = &slot;
           break;
         }
@@ -315,7 +315,8 @@ void processarLinha() {
     char *totalTexto = strtok(nullptr, " ");
     char *modo = strtok(nullptr, " ");
     char *blocoTexto = strtok(nullptr, " ");
-    if (!cmd || !tipo || !totalTexto || !modo || !blocoTexto ||
+    char *timeoutTexto = strtok(nullptr, " ");
+    if (!cmd || !tipo || !totalTexto || !modo || !blocoTexto || !timeoutTexto ||
         strtok(nullptr, " ") || strlen(tipo) != 1 ||
         (tipo[0] != 'T' && tipo[0] != 'I') ||
         (strcmp(modo, "SW") != 0 && strcmp(modo, "SR") != 0)) {
@@ -333,9 +334,15 @@ void processarLinha() {
       Serial.println("@FAIL bloco_invalido");
       return;
     }
+    const unsigned long timeout = strtoul(timeoutTexto, &fim, 10);
+    if (fim == timeoutTexto || *fim != '\0' || timeout < 500 || timeout > 10000) {
+      Serial.println("@FAIL timeout_invalido");
+      return;
+    }
     tamanho = total;
     carregados = 0;
     tamanhoQuadro = bloco;
+    ackTimeoutMs = timeout;
     tipoTransferencia = tipo[0];
     seletivo = strcmp(modo, "SR") == 0;
     transferenciaAtiva = true;
